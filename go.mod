@@ -1,4 +1,4 @@
-module github.com/ahoo/cpa-plugin-opencodezen
+module github.com/Victor9578/cpa-plugin-opencodezen
 
 go 1.24
 

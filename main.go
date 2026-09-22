@@ -604,6 +604,31 @@ func authLabel(provider, id string) string {
 	return fmt.Sprintf("%s (%s…)", provider, id)
 }
 
+type authParseResponse struct {
+	Handled bool       `json:"Handled"`
+	Auth    authData   `json:"Auth,omitempty"`
+	Auths   []authData `json:"Auths,omitempty"`
+}
+
+type authData struct {
+	Provider         string          `json:"Provider"`
+	ID               string          `json:"ID"`
+	FileName         string          `json:"FileName"`
+	Label            string          `json:"Label"`
+	Prefix           string          `json:"Prefix"`
+	ProxyURL         string          `json:"ProxyURL"`
+	Disabled         bool            `json:"Disabled"`
+	StorageJSON      json.RawMessage `json:"StorageJSON"`
+	Metadata         map[string]any  `json:"Metadata"`
+	Attributes       map[string]any  `json:"Attributes"`
+	NextRefreshAfter string          `json:"NextRefreshAfter"`
+}
+
+func sha256Prefix(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
+}
+
 // hostAuthSaveRequest mirrors pluginapi.HostAuthSaveRequest: the host
 // persists credential JSON into a physical auth file.
 type hostAuthSaveRequest struct {
