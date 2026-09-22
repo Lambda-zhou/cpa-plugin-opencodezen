@@ -77,6 +77,9 @@ func TestRegister(t *testing.T) {
 	if !reg.Capabilities.ModelRegistrar {
 		t.Fatal("want model_registrar capability")
 	}
+	if !reg.Capabilities.AuthProvider {
+		t.Fatal("want auth_provider capability")
+	}
 	if reg.Metadata.Name != pluginID {
 		t.Fatalf("metadata name = %q", reg.Metadata.Name)
 	}
@@ -162,6 +165,64 @@ func TestCountTokens(t *testing.T) {
 	json.Unmarshal(out, &env)
 	if !env.OK {
 		t.Fatalf("count_tokens not ok: %s", out)
+	}
+}
+
+func TestAuthParseReturnsRecords(t *testing.T) {
+	resetConfig(t, testConfig())
+	out, err := handleMethod("auth.parse", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("auth.parse not ok: %s", out)
+	}
+	var resp authParseResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Handled {
+		t.Fatalf("auth.parse should be handled: %s", out)
+	}
+	if len(resp.Auths) != 2 {
+		t.Fatalf("auths = %d, want 2: %s", len(resp.Auths), out)
+	}
+	for _, a := range resp.Auths {
+		if a.Provider != "zen" {
+			t.Fatalf("auth provider = %q", a.Provider)
+		}
+		if len(a.StorageJSON) == 0 {
+			t.Fatalf("auth storage json empty for %q", a.ID)
+		}
+		if a.ID == "" || a.FileName == "" {
+			t.Fatalf("auth id/file empty: %+v", a)
+		}
+	}
+}
+
+func TestAuthIdentifierMethod(t *testing.T) {
+	resetConfig(t, testConfig())
+	out, err := handleMethod("auth.identifier", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("auth.identifier not ok: %s", out)
+	}
+	var id identifierResponse
+	if err := json.Unmarshal(env.Result, &id); err != nil {
+		t.Fatal(err)
+	}
+	if id.Identifier != "zen" {
+		t.Fatalf("identifier = %q", id.Identifier)
 	}
 }
 

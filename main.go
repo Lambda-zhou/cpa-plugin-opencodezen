@@ -340,6 +340,7 @@ type capabilities struct {
 	ExecutorInputFormats  []string `json:"executor_input_formats"`
 	ExecutorOutputFormats []string `json:"executor_output_formats"`
 	ModelRegistrar        bool     `json:"model_registrar"`
+	AuthProvider          bool     `json:"auth_provider"`
 }
 
 type modelInfo struct {
@@ -371,6 +372,9 @@ type executorRequest struct {
 	OriginalRequest []byte              `json:"OriginalRequest"`
 	SourceFormat    string              `json:"SourceFormat"`
 	Payload         []byte              `json:"Payload"`
+	StorageJSON     []byte              `json:"StorageJSON"`
+	AuthMetadata    map[string]any      `json:"AuthMetadata"`
+	AuthAttributes  map[string]any      `json:"AuthAttributes"`
 	Metadata        map[string]any      `json:"Metadata"`
 	StreamID        string              `json:"stream_id,omitempty"`
 	HostCallbackID  string              `json:"host_callback_id,omitempty"`
@@ -499,10 +503,13 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 				ExecutorInputFormats:  []string{"chat-completions", "responses"},
 				ExecutorOutputFormats: []string{"chat-completions", "responses"},
 				ModelRegistrar:        true,
+				AuthProvider:          true,
 			},
 		})
-	case "executor.identifier":
+	case "executor.identifier", "auth.identifier":
 		return okEnvelopeJSON(identifierResponse{Identifier: loadedConfig().Provider})
+	case "auth.parse":
+		return authParse(payload)
 	case "model.register":
 		return modelRegistration()
 	case "executor.execute":
@@ -514,6 +521,93 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// auth provider
+// ---------------------------------------------------------------------------
+
+// authParse generates virtual auth records from the plugin-configured API
+// keys. CLIProxyAPI needs these records before it can route a model request
+// to an executor; without them the host returns auth_not_found.
+func authParse(payload []byte) ([]byte, error) {
+	cfg := loadedConfig()
+	// Re-read config from the payload in case the host sent updated YAML.
+	if len(payload) > 0 {
+		var req struct {
+			Provider    string          `json:"Provider"`
+			StorageJSON json.RawMessage `json:"StorageJSON"`
+		}
+		if err := json.Unmarshal(payload, &req); err == nil && len(req.StorageJSON) > 0 {
+			// Use the key from the host-passed StorageJSON if we recognize it.
+			var stored struct {
+				APIKey string `json:"api_key"`
+			}
+			if err := json.Unmarshal(req.StorageJSON, &stored); err == nil && stored.APIKey != "" {
+				for _, k := range cfg.APIKeys {
+					if k == stored.APIKey {
+						id := sha256Prefix(stored.APIKey)
+						return okEnvelopeJSON(authParseResponse{
+							Handled: true,
+							Auth: authData{
+								Provider:    cfg.Provider,
+								ID:          fmt.Sprintf("%s-%s", cfg.Provider, id),
+								FileName:    fmt.Sprintf("%s-%s.json", cfg.Provider, id),
+								Label:       fmt.Sprintf("%s (%s…)", cfg.Provider, id),
+								StorageJSON: req.StorageJSON,
+								Metadata:    map[string]any{"type": cfg.Provider},
+							},
+						})
+					}
+				}
+			}
+		}
+	}
+	if len(cfg.APIKeys) == 0 {
+		return okEnvelopeJSON(authParseResponse{Handled: true})
+	}
+	auths := make([]authData, 0, len(cfg.APIKeys))
+	for _, key := range cfg.APIKeys {
+		if key == "" {
+			continue
+		}
+		storageJSON, _ := json.Marshal(map[string]string{"api_key": key})
+		id := sha256Prefix(key)
+		auths = append(auths, authData{
+			Provider:    cfg.Provider,
+			ID:          fmt.Sprintf("%s-%s", cfg.Provider, id),
+			FileName:    fmt.Sprintf("%s-%s.json", cfg.Provider, id),
+			Label:       fmt.Sprintf("%s (%s…)", cfg.Provider, id),
+			StorageJSON: storageJSON,
+			Metadata:    map[string]any{"type": cfg.Provider},
+		})
+	}
+	return okEnvelopeJSON(authParseResponse{Handled: true, Auths: auths})
+}
+
+type authParseResponse struct {
+	Handled bool       `json:"Handled"`
+	Auth    authData   `json:"Auth,omitempty"`
+	Auths   []authData `json:"Auths,omitempty"`
+}
+
+type authData struct {
+	Provider         string          `json:"Provider"`
+	ID               string          `json:"ID"`
+	FileName         string          `json:"FileName"`
+	Label            string          `json:"Label"`
+	Prefix           string          `json:"Prefix"`
+	ProxyURL         string          `json:"ProxyURL"`
+	Disabled         bool            `json:"Disabled"`
+	StorageJSON      json.RawMessage `json:"StorageJSON"`
+	Metadata         map[string]any  `json:"Metadata"`
+	Attributes       map[string]any  `json:"Attributes"`
+	NextRefreshAfter string          `json:"NextRefreshAfter"`
+}
+
+func sha256Prefix(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
 }
 
 // ---------------------------------------------------------------------------
@@ -586,9 +680,10 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	}
 	headers := gateHeaders(req)
 	endpointURL := cfg.BaseURL + route.EndpointPath()
+	apiKey := apiKeyForRequest(req, cfg)
 
 	if !stream {
-		body, respHeaders, status, err := doUpstream(req.HostCallbackID, http.MethodPost, endpointURL, headers, upstreamBody)
+		body, respHeaders, status, err := doUpstream(req.HostCallbackID, http.MethodPost, endpointURL, headers, apiKey, upstreamBody)
 		if err != nil {
 			return nil, err
 		}
@@ -606,15 +701,30 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	if streamID == "" {
 		return nil, fmt.Errorf("stream_id is required for executor.execute_stream")
 	}
-	go runStream(req, cfg, route, endpointURL, headers, upstreamBody, streamID)
+	go runStream(req, cfg, route, endpointURL, headers, apiKey, upstreamBody, streamID)
 	return okEnvelopeJSON(executorStreamResponse{
 		Headers: map[string][]string{"Content-Type": {"text/event-stream"}},
 	})
 }
 
+// apiKeyForRequest resolves the zen API key for an executor request. It
+// prefers the key carried by the host-selected auth record (StorageJSON) and
+// falls back to the plugin-config rotation when the host provides none.
+func apiKeyForRequest(req executorRequest, cfg pluginConfig) string {
+	if len(req.StorageJSON) > 0 {
+		var stored struct {
+			APIKey string `json:"api_key"`
+		}
+		if err := json.Unmarshal(req.StorageJSON, &stored); err == nil && strings.TrimSpace(stored.APIKey) != "" {
+			return strings.TrimSpace(stored.APIKey)
+		}
+	}
+	return nextAPIKey(cfg)
+}
+
 // runStream performs the upstream call and forwards SSE frames through the
 // host stream bridge until done, then closes the plugin stream.
-func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpointURL string, headers map[string][]string, body []byte, streamID string) {
+func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpointURL string, headers map[string][]string, apiKey string, body []byte, streamID string) {
 	closeStream := func(errMsg string) {
 		_, _ = callHost("host.stream.close", map[string]any{"stream_id": streamID, "error": strings.TrimSpace(errMsg)})
 	}
@@ -624,7 +734,7 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpoint
 		}
 	}()
 
-	resp, err := doUpstreamStream(req.HostCallbackID, http.MethodPost, endpointURL, headers, body)
+	resp, err := doUpstreamStream(req.HostCallbackID, http.MethodPost, endpointURL, headers, apiKey, body)
 	if err != nil {
 		closeStream(err.Error())
 		return
@@ -1079,12 +1189,11 @@ func nextAPIKey(cfg pluginConfig) string {
 }
 
 // doUpstream performs a blocking host HTTP call.
-func doUpstream(hostCallbackID, method, url string, headers map[string][]string, body []byte) ([]byte, map[string][]string, int, error) {
-	cfg := loadedConfig()
+func doUpstream(hostCallbackID, method, url string, headers map[string][]string, apiKey string, body []byte) ([]byte, map[string][]string, int, error) {
 	req := map[string]any{
 		"Method":  method,
 		"URL":     url,
-		"Headers": withAuth(headers, nextAPIKey(cfg)),
+		"Headers": withAuth(headers, apiKey),
 		"Body":    body,
 	}
 	if hostCallbackID != "" {
@@ -1109,12 +1218,11 @@ type hostStreamHandle struct {
 }
 
 // doUpstreamStream opens a host HTTP stream and returns immediately.
-func doUpstreamStream(hostCallbackID, method, url string, headers map[string][]string, body []byte) (*hostStreamHandle, error) {
-	cfg := loadedConfig()
+func doUpstreamStream(hostCallbackID, method, url string, headers map[string][]string, apiKey string, body []byte) (*hostStreamHandle, error) {
 	req := map[string]any{
 		"Method":  method,
 		"URL":     url,
-		"Headers": withAuth(headers, nextAPIKey(cfg)),
+		"Headers": withAuth(headers, apiKey),
 		"Body":    body,
 	}
 	if hostCallbackID != "" {
