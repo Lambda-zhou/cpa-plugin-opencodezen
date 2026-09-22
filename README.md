@@ -62,47 +62,44 @@ Then add your keys and models to `plugins.configs.zen` (see below) and restart.
 
 ### Configure
 
+#### 推荐方式：在 Management Center（AI 提供商）或 `config.yaml` 中配置
+
+插件已内置了全部 OpenCode Zen 免费模型路由规则（`muse-spark` 自动走 `/responses`，其他模型自动走 `/chat/completions`）。
+
+你可以直接在 CPA 控制台的 **AI 提供商** 界面（`#/ai-providers`）添加，或者直接在 `config.yaml` 的 `openai-compatibility` 中添加：
+
 ```yaml
 plugins:
   enabled: true
+  dir: "plugins"
   configs:
     zen:
       enabled: true
-      priority: 1
-      provider: zen
-      base-url: https://opencode.ai/zen/v1
-      api-keys:
-        - sk-opencode-your-key-1
-        - sk-opencode-your-key-2
-      client: cli
-      project: global
-      models:
-        - model: mimo-v2.6-flash-free
-          endpoint: chat
-          alias: mimo-v2.6-flash-free
-        - model: mimo-v2.5-free
-          endpoint: chat
-          alias: mimo-v2.5-free
-        - model: ling-3.0-flash-fin-free
-          endpoint: chat
-          alias: ling-3.0-flash-fin-free
-        - model: nemotron-3-ultra-free
-          endpoint: chat
-          alias: nemotron-3-ultra-free
-        - model: muse-spark-1.3-contributor-free
-          endpoint: responses
-          alias: muse-spark-1.3-contributor-free
 
-# No openai-compatibility entries needed — the plugin handles everything.
-# Keep this to avoid zen rejecting image tools:
+# 在 AI 提供商 (openai-compatibility) 中管理 Zen 的 Key 和模型
+openai-compatibility:
+  - name: zen
+    base-url: https://opencode.ai/zen/v1
+    api-key-entries:
+      - api-key: sk-your-zen-api-key-here
+    models:
+      - name: mimo-v2.6-flash-free
+      - name: mimo-v2.5-free
+      - name: ling-3.0-flash-fin-free
+      - name: nemotron-3-ultra-free
+      - name: muse-spark-1.3-contributor-free
+
+# 避免 zen 拒绝 image tools
 disable-image-generation: "chat"
 ```
 
-**Keys persist automatically.** On startup (and on every config reload) the
-plugin writes each configured key into the CPA auth directory as
-`zen-<hash>.json` through the host's credential API, so the keys survive
-restarts and appear in the Management Center credential list like any other
-provider. You can also manage them there afterwards.
+> **提示**：
+> - 插件作为 `zen` 专属执行器（Executor），会自动拦截目标为 `zen` 的请求并处理 Session 伪装、请求头伪装、工具注入以及 SSE 流式转发。
+> - 在 Management Center 的 AI 提供商面板修改服务地址（`base-url`）或 API 密钥时，插件会自动动态提取生效，无需在插件配置里重复填写！
+
+#### 兼容方式：在 `plugins.configs.zen` 中配置
+
+插件仍支持通过 `plugins.configs.zen` 传入 keys、models、client 等字段，保持对旧版配置的向下兼容。
 
 ### Verify
 

@@ -226,6 +226,40 @@ func TestAuthIdentifierMethod(t *testing.T) {
 	}
 }
 
+func TestModelRegistrationDefaultFallback(t *testing.T) {
+	resetConfig(t, pluginConfig{Enabled: true, Provider: "zen"})
+	out, err := modelRegistration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatal(err)
+	}
+	var resp modelRegistrationResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Models) == 0 {
+		t.Fatal("expected default models when none configured")
+	}
+}
+
+func TestBaseURLAndAPIKeyFromStorageJSON(t *testing.T) {
+	cfg := pluginConfig{Enabled: true, Provider: "zen", BaseURL: "https://default.url"}
+	req := executorRequest{
+		StorageJSON: []byte(`{"base_url": "https://custom.url/v1", "api_key": "sk-custom-key"}`),
+	}
+	u := baseURLForRequest(req, cfg)
+	if u != "https://custom.url/v1" {
+		t.Fatalf("baseURL = %q, want https://custom.url/v1", u)
+	}
+	k := apiKeyForRequest(req, cfg)
+	if k != "sk-custom-key" {
+		t.Fatalf("apiKey = %q, want sk-custom-key", k)
+	}
+}
+
 // =========================================================================
 // route resolution
 // =========================================================================
@@ -246,11 +280,18 @@ func TestRouteForModelAliasMatch(t *testing.T) {
 	}
 }
 
-func TestRouteForModelUnknown(t *testing.T) {
+func TestRouteForModelUnknownInference(t *testing.T) {
 	cfg := testConfig()
-	_, ok := routeForModel(cfg, "nonexistent-model")
-	if ok {
-		t.Fatal("expected unknown model to return false")
+	// Unknown model without "muse" or "responses" defaults to "chat"
+	route, ok := routeForModel(cfg, "deepseek-v3")
+	if !ok || route.Endpoint != "chat" {
+		t.Fatalf("expected inferred chat route, got: %+v, ok=%v", route, ok)
+	}
+
+	// Unknown model with "muse" defaults to "responses"
+	routeMuse, ok := routeForModel(cfg, "muse-spark-custom")
+	if !ok || routeMuse.Endpoint != "responses" {
+		t.Fatalf("expected inferred responses route, got: %+v, ok=%v", routeMuse, ok)
 	}
 }
 

@@ -289,8 +289,32 @@ func boolValue(v any) bool {
 	}
 }
 
-// routeForModel resolves the configured route for a requested model id
-// (exact match on model or alias).
+// defaultModelRoutes defines the built-in routing for known Zen models.
+var defaultModelRoutes = map[string]string{
+	"muse-spark-1.3-contributor-free": "responses",
+	"muse-spark-1.3":                  "responses",
+	"mimo-v2.6-flash-free":            "chat",
+	"mimo-v2.5-free":                  "chat",
+	"ling-3.0-flash-fin-free":         "chat",
+	"nemotron-3-ultra-free":           "chat",
+}
+
+// inferEndpoint resolves the upstream endpoint ("chat" or "responses") for a model.
+// Any model containing "muse" or "responses" defaults to "responses"; others to "chat".
+func inferEndpoint(model string) string {
+	lower := strings.ToLower(model)
+	if ep, ok := defaultModelRoutes[lower]; ok {
+		return ep
+	}
+	if strings.Contains(lower, "muse") || strings.Contains(lower, "responses") {
+		return "responses"
+	}
+	return "chat"
+}
+
+// routeForModel resolves the route for a requested model id.
+// It checks explicit plugin configuration first; if none match, it automatically
+// infers the route so any model added in openai-compatibility works out of the box.
 func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -301,7 +325,12 @@ func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 			return m, true
 		}
 	}
-	return modelRoute{}, false
+	// Fallback to intelligent inference
+	return modelRoute{
+		Model:    model,
+		Alias:    model,
+		Endpoint: inferEndpoint(model),
+	}, true
 }
 
 // ---------------------------------------------------------------------------
@@ -493,13 +522,7 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 				GitHubRepository: "https://github.com/Victor9578/cpa-plugin-opencodezen",
 				Logo:             "https://raw.githubusercontent.com/Victor9578/cpa-plugin-opencodezen/main/logo.svg",
 				ConfigFields: []any{
-					map[string]any{"Name": "enabled", "Type": "boolean", "Description": "Enable the zen provider."},
-					map[string]any{"Name": "provider", "Type": "string", "Description": "Provider key CPA uses for routing (default zen)."},
-					map[string]any{"Name": "base-url", "Type": "string", "Description": "OpenCode Zen base URL (default https://opencode.ai/zen/v1)."},
-					map[string]any{"Name": "api-keys", "Type": "array", "Description": "Zen API keys; the plugin rotates them round-robin and persists each as a credential file."},
-					map[string]any{"Name": "client", "Type": "string", "Description": "X-Opencode-Client value (default cli)."},
-					map[string]any{"Name": "project", "Type": "string", "Description": "X-Opencode-Project value (default global)."},
-					map[string]any{"Name": "models", "Type": "array", "Description": "Model entries: model (upstream name), endpoint (chat|responses), alias (client-facing name)."},
+					map[string]any{"Name": "enabled", "Type": "boolean", "Description": "Enable the zen provider plugin."},
 				},
 			},
 			Capabilities: capabilities{
@@ -710,15 +733,35 @@ func syncConfiguredKeys(cfg pluginConfig) {
 // model registration
 // ---------------------------------------------------------------------------
 
+// defaultZenModels announces the free-tier Zen models supported out of the box.
+var defaultZenModels = []modelRoute{
+	{Model: "mimo-v2.6-flash-free", Alias: "mimo-v2.6-flash-free", Endpoint: "chat"},
+	{Model: "mimo-v2.5-free", Alias: "mimo-v2.5-free", Endpoint: "chat"},
+	{Model: "ling-3.0-flash-fin-free", Alias: "ling-3.0-flash-fin-free", Endpoint: "chat"},
+	{Model: "nemotron-3-ultra-free", Alias: "nemotron-3-ultra-free", Endpoint: "chat"},
+	{Model: "muse-spark-1.3-contributor-free", Alias: "muse-spark-1.3-contributor-free", Endpoint: "responses"},
+}
+
+// modelRegistration announces supported Zen models to CPA.
+// If the user configured custom models in plugins.configs.zen, it announces those;
+// otherwise it announces the default set of Zen free-tier models.
 func modelRegistration() ([]byte, error) {
 	cfg := loadedConfig()
-	models := make([]modelInfo, 0, len(cfg.Models))
-	for _, m := range cfg.Models {
+	declared := cfg.Models
+	if len(declared) == 0 {
+		declared = defaultZenModels
+	}
+	models := make([]modelInfo, 0, len(declared))
+	for _, m := range declared {
 		if m.Model == "" {
 			continue
 		}
+		alias := m.Alias
+		if alias == "" {
+			alias = m.Model
+		}
 		models = append(models, modelInfo{
-			ID:          m.Alias,
+			ID:          alias,
 			Object:      "model",
 			Created:     1735689600,
 			OwnedBy:     cfg.Provider,
@@ -764,9 +807,13 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("zen provider has no model %q", req.Model)
 	}
-	if len(cfg.APIKeys) == 0 {
-		return nil, fmt.Errorf("zen provider has no api-keys configured")
+
+	apiKey := apiKeyForRequest(req, cfg)
+	if apiKey == "" {
+		return nil, fmt.Errorf("zen provider has no api-key for request (please configure in AI Provider panel or plugins.configs.zen)")
 	}
+
+	baseURL := baseURLForRequest(req, cfg)
 
 	// Gate rule 4: zen only answers streaming requests. For non-streaming
 	// clients we still stream upstream and fold the SSE answer below.
@@ -775,8 +822,7 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 		return nil, err
 	}
 	headers := gateHeaders(req)
-	endpointURL := cfg.BaseURL + route.EndpointPath()
-	apiKey := apiKeyForRequest(req, cfg)
+	endpointURL := baseURL + route.EndpointPath()
 
 	if !stream {
 		body, respHeaders, status, err := doUpstream(req.HostCallbackID, http.MethodPost, endpointURL, headers, apiKey, upstreamBody)
@@ -803,6 +849,31 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	})
 }
 
+// baseURLForRequest resolves the upstream base URL. It checks the host-selected
+// auth record (StorageJSON) first for any custom service address, falling back to
+// plugin config or the default https://opencode.ai/zen/v1.
+func baseURLForRequest(req executorRequest, cfg pluginConfig) string {
+	if len(req.StorageJSON) > 0 {
+		var stored struct {
+			BaseURL string `json:"base_url"`
+			URL     string `json:"url"`
+		}
+		if err := json.Unmarshal(req.StorageJSON, &stored); err == nil {
+			u := strings.TrimRight(strings.TrimSpace(stored.BaseURL), "/")
+			if u == "" {
+				u = strings.TrimRight(strings.TrimSpace(stored.URL), "/")
+			}
+			if u != "" {
+				return u
+			}
+		}
+	}
+	if cfg.BaseURL != "" {
+		return cfg.BaseURL
+	}
+	return zenBaseURL
+}
+
 // apiKeyForRequest resolves the zen API key for an executor request. It
 // prefers the key carried by the host-selected auth record (StorageJSON) and
 // falls back to the plugin-config rotation when the host provides none.
@@ -810,9 +881,15 @@ func apiKeyForRequest(req executorRequest, cfg pluginConfig) string {
 	if len(req.StorageJSON) > 0 {
 		var stored struct {
 			APIKey string `json:"api_key"`
+			Key    string `json:"key"`
 		}
-		if err := json.Unmarshal(req.StorageJSON, &stored); err == nil && strings.TrimSpace(stored.APIKey) != "" {
-			return strings.TrimSpace(stored.APIKey)
+		if err := json.Unmarshal(req.StorageJSON, &stored); err == nil {
+			if k := strings.TrimSpace(stored.APIKey); k != "" {
+				return k
+			}
+			if k := strings.TrimSpace(stored.Key); k != "" {
+				return k
+			}
 		}
 	}
 	return nextAPIKey(cfg)
