@@ -596,6 +596,23 @@ func authParse(payload []byte) ([]byte, error) {
 	return okEnvelopeJSON(authParseResponse{Handled: true, Auths: auths})
 }
 
+// ---------------------------------------------------------------------------
+// credential file sync (host.auth.save)
+// ---------------------------------------------------------------------------
+
+// persistCredentialJSON returns the JSON blob that host.auth.save writes
+// into the physical credential file. CPA detects the provider from the
+// "provider" field inside the JSON; without it the file shows as
+// type=unknown/provider=unknown and auth.parse is never called.
+func persistCredentialJSON(provider, apiKey string) json.RawMessage {
+	raw, _ := json.Marshal(map[string]string{
+		"provider": provider,
+		"api_key":  apiKey,
+	})
+	return raw
+}
+}
+
 // authLabel renders the management-UI label for one zen key.
 func authLabel(provider, id string) string {
 	if provider == "zen" {
@@ -679,8 +696,7 @@ func syncConfiguredKeys(cfg pluginConfig) {
 			delete(existing, name) // still configured; don't delete below
 			continue
 		}
-		storageJSON, _ := json.Marshal(map[string]string{"api_key": key})
-		if _, err := callHost("host.auth.save", hostAuthSaveRequest{Name: name, JSON: storageJSON}); err != nil {
+		if _, err := callHost("host.auth.save", hostAuthSaveRequest{Name: name, JSON: persistCredentialJSON(cfg.Provider, key)}); err != nil {
 			// Non-fatal: the virtual Auths fallback in auth.parse still works
 			// for this process lifetime.
 			continue
