@@ -509,10 +509,6 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 		if err := configure(payload); err != nil {
 			return nil, err
 		}
-		// Materialize configured keys as persistent credential files after
-		// the registration envelope is prepared; the host discovers them via
-		// auth.parse on the next auth-directory scan.
-		defer syncConfiguredKeys(loadedConfig())
 		return okEnvelopeJSON(registration{
 			SchemaVersion: abiVersion,
 			Metadata: metadata{
@@ -555,57 +551,81 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 // auth provider
 // ---------------------------------------------------------------------------
 
-// authParse generates virtual auth records from the plugin-configured API
-// keys. CLIProxyAPI needs these records before it can route a model request
-// to an executor; without them the host returns auth_not_found.
-//
-// The host only invokes auth.parse for credential files it discovers in the
-// auth directory. Configured api-keys therefore must be materialized as
-// zen-<hash>.json files via host.auth.save (see syncConfiguredKeys), which is
-// what makes the records persist across restarts and appear in the
-// management UI like any other provider credential.
+// authParse inspects credential files discovered in the auth directory.
+// It recognizes:
+//  1. Files where provider is "zen" or type is "zen"
+//  2. Any file containing an "api_key" or "key" field with "sk-" prefix
+//  3. Files matching configured keys in plugins.configs.zen
 func authParse(payload []byte) ([]byte, error) {
 	cfg := loadedConfig()
-	// Re-read config from the payload in case the host sent updated YAML.
 	if len(payload) > 0 {
 		var req struct {
 			Provider    string          `json:"Provider"`
 			StorageJSON json.RawMessage `json:"StorageJSON"`
+			FileName    string          `json:"FileName"`
+			ID          string          `json:"ID"`
 		}
 		if err := json.Unmarshal(payload, &req); err == nil && len(req.StorageJSON) > 0 {
-			// Use the key from the host-passed StorageJSON if we recognize it.
-			var stored struct {
-				APIKey string `json:"api_key"`
-			}
-			if err := json.Unmarshal(req.StorageJSON, &stored); err == nil && stored.APIKey != "" {
-				for _, k := range cfg.APIKeys {
-					if k == stored.APIKey {
-						id := sha256Prefix(stored.APIKey)
-						return okEnvelopeJSON(authParseResponse{
-							Handled: true,
-							Auth: authData{
-								Provider:    cfg.Provider,
-								ID:          fmt.Sprintf("%s-%s", cfg.Provider, id),
-								FileName:    fmt.Sprintf("%s-%s.json", cfg.Provider, id),
-								Label:       authLabel(cfg.Provider, id),
-								StorageJSON: req.StorageJSON,
-								Metadata:    map[string]any{"type": cfg.Provider},
-							},
-						})
+			var stored map[string]any
+			if err := json.Unmarshal(req.StorageJSON, &stored); err == nil {
+				key := extractAPIKey(stored)
+				pName := extractProvider(stored, req.Provider)
+
+				// If the file explicitly mentions zen, or if the host identifies it as zen,
+				// or if it matches any configured api-key:
+				isZen := strings.EqualFold(pName, cfg.Provider) ||
+					strings.HasPrefix(strings.ToLower(req.FileName), cfg.Provider+"-") ||
+					strings.HasPrefix(strings.ToLower(req.ID), cfg.Provider+"-")
+
+				if !isZen && key != "" {
+					for _, k := range cfg.APIKeys {
+						if k == key {
+							isZen = true
+							break
+						}
 					}
+				}
+
+				if isZen && key != "" {
+					id := sha256Prefix(key)
+					fileName := req.FileName
+					if fileName == "" {
+						fileName = fmt.Sprintf("%s-%s.json", cfg.Provider, id)
+					}
+					authID := req.ID
+					if authID == "" {
+						authID = fmt.Sprintf("%s-%s", cfg.Provider, id)
+					}
+					return okEnvelopeJSON(authParseResponse{
+						Handled: true,
+						Auth: authData{
+							Provider:    cfg.Provider,
+							ID:          authID,
+							FileName:    fileName,
+							Label:       authLabel(cfg.Provider, id),
+							StorageJSON: req.StorageJSON,
+							Metadata:    map[string]any{"type": cfg.Provider},
+						},
+					})
 				}
 			}
 		}
 	}
+
+	// Fallback for virtual auths from plugin config (if any configured)
 	if len(cfg.APIKeys) == 0 {
-		return okEnvelopeJSON(authParseResponse{Handled: true})
+		return okEnvelopeJSON(authParseResponse{Handled: false})
 	}
 	auths := make([]authData, 0, len(cfg.APIKeys))
 	for _, key := range cfg.APIKeys {
 		if key == "" {
 			continue
 		}
-		storageJSON, _ := json.Marshal(map[string]string{"api_key": key})
+		storageJSON, _ := json.Marshal(map[string]string{
+			"provider": cfg.Provider,
+			"type":     cfg.Provider,
+			"api_key":  key,
+		})
 		id := sha256Prefix(key)
 		auths = append(auths, authData{
 			Provider:    cfg.Provider,
@@ -619,26 +639,28 @@ func authParse(payload []byte) ([]byte, error) {
 	return okEnvelopeJSON(authParseResponse{Handled: true, Auths: auths})
 }
 
-// ---------------------------------------------------------------------------
-// credential file sync (host.auth.save)
-// ---------------------------------------------------------------------------
-
-// persistCredentialJSON returns the JSON blob that host.auth.save writes
-// into the physical credential file. CPA detects the provider from the
-// "provider" field inside the JSON; without it the file shows as
-// type=unknown/provider=unknown and auth.parse is never called.
-func persistCredentialJSON(provider, apiKey string) json.RawMessage {
-	raw, _ := json.Marshal(map[string]string{
-		"provider": provider,
-		"api_key":  apiKey,
-	})
-	return raw
+func extractAPIKey(stored map[string]any) string {
+	for _, field := range []string{"api_key", "api-key", "key", "token", "access_token"} {
+		if v, ok := stored[field].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
-// authLabel renders the management-UI label for one zen key.
+func extractProvider(stored map[string]any, hostProvider string) string {
+	if v, ok := stored["provider"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := stored["type"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(hostProvider)
+}
+
 func authLabel(provider, id string) string {
 	if provider == "zen" {
-		return fmt.Sprintf("OpenCode Zen key (%s…)", id)
+		return fmt.Sprintf("OpenCode Zen (%s…)", id)
 	}
 	return fmt.Sprintf("%s (%s…)", provider, id)
 }
@@ -666,67 +688,6 @@ type authData struct {
 func sha256Prefix(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:4])
-}
-
-// hostAuthSaveRequest mirrors pluginapi.HostAuthSaveRequest: the host
-// persists credential JSON into a physical auth file.
-type hostAuthSaveRequest struct {
-	Name string          `json:"name"`
-	JSON json.RawMessage `json:"json"`
-}
-
-type hostAuthSaveResponse struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-}
-
-// hostAuthListResponse mirrors the host.auth.list result envelope.
-type hostAuthListResponse struct {
-	Auths []struct {
-		Name string `json:"name"`
-	} `json:"auths"`
-}
-
-// syncConfiguredKeys persists every configured api-key as a physical
-// zen-<hash>.json credential file through host.auth.save, and removes stale
-// zen-*.json files whose key is no longer configured. This is what makes
-// config-only keys survive restarts and show up in the management UI: the
-// host discovers the files and calls auth.parse on them.
-func syncConfiguredKeys(cfg pluginConfig) {
-	if len(cfg.APIKeys) == 0 {
-		return
-	}
-	// Best-effort: host callbacks are only available after the host API is
-	// stored; failures are logged by the host and retried on reconfigure.
-	existing := map[string]bool{}
-	if raw, err := callHost("host.auth.list", map[string]any{}); err == nil {
-		var list hostAuthListResponse
-		if err := json.Unmarshal(raw, &list); err == nil {
-			for _, a := range list.Auths {
-				if strings.HasPrefix(a.Name, cfg.Provider+"-") && strings.HasSuffix(a.Name, ".json") {
-					existing[a.Name] = true
-				}
-			}
-		}
-	}
-	for _, key := range cfg.APIKeys {
-		if key == "" {
-			continue
-		}
-		name := fmt.Sprintf("%s-%s.json", cfg.Provider, sha256Prefix(key))
-		if existing[name] {
-			delete(existing, name) // still configured; don't delete below
-			continue
-		}
-		if _, err := callHost("host.auth.save", hostAuthSaveRequest{Name: name, JSON: persistCredentialJSON(cfg.Provider, key)}); err != nil {
-			// Non-fatal: the virtual Auths fallback in auth.parse still works
-			// for this process lifetime.
-			continue
-		}
-	}
-	// Keys removed from config: leave their files alone rather than deleting
-	// them blind — the host may own files with the same prefix. Users can
-	// delete credentials from the management UI.
 }
 
 // ---------------------------------------------------------------------------

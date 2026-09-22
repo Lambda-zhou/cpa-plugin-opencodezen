@@ -260,6 +260,52 @@ func TestBaseURLAndAPIKeyFromStorageJSON(t *testing.T) {
 	}
 }
 
+func TestAuthParseFromFilePayload(t *testing.T) {
+	resetConfig(t, pluginConfig{Enabled: true, Provider: "zen"})
+
+	// Scenario 1: User creates a zen auth file with provider="zen"
+	payload, _ := json.Marshal(map[string]any{
+		"Provider": "zen",
+		"StorageJSON": []byte(`{"provider":"zen","api_key":"sk-opencode-secret-123","base_url":"https://opencode.ai/zen/v1"}`),
+		"FileName": "zen-test.json",
+	})
+	out, err := handleMethod("auth.parse", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("auth.parse not ok: %s", out)
+	}
+	var resp authParseResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Handled || resp.Auth.Provider != "zen" || resp.Auth.FileName != "zen-test.json" {
+		t.Fatalf("unexpected auth response: %+v", resp)
+	}
+
+	// Scenario 2: User creates an auth file where type="zen"
+	payload2, _ := json.Marshal(map[string]any{
+		"StorageJSON": []byte(`{"type":"zen","key":"sk-opencode-secret-456"}`),
+		"FileName": "my-zen-key.json",
+	})
+	out2, err := handleMethod("auth.parse", payload2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env2 envelope
+	json.Unmarshal(out2, &env2)
+	var resp2 authParseResponse
+	json.Unmarshal(env2.Result, &resp2)
+	if !resp2.Handled || resp2.Auth.Provider != "zen" {
+		t.Fatalf("unexpected auth response 2: %+v", resp2)
+	}
+}
+
 // =========================================================================
 // route resolution
 // =========================================================================

@@ -62,12 +62,11 @@ Then add your keys and models to `plugins.configs.zen` (see below) and restart.
 
 ### Configure
 
-#### 推荐方式：在 Management Center（AI 提供商）或 `config.yaml` 中配置
+#### 方式一：在 AI 提供商 / 凭据面板（OAuth / 认证管理）中配置（强烈推荐）
 
-插件已内置了全部 OpenCode Zen 免费模型路由规则（`muse-spark` 自动走 `/responses`，其他模型自动走 `/chat/completions`）。
+插件作为��生的 `zen` 供应商执行器（Executor）与认证提供者（AuthProvider），请求将完全经过插件的 Gate 伪装引擎。
 
-你可以直接在 CPA 控制台的 **AI 提供商** 界面（`#/ai-providers`）添加，或者直接在 `config.yaml` 的 `openai-compatibility` 中添加：
-
+**步骤 1：在 `config.yaml` 中仅需启用插件**
 ```yaml
 plugins:
   enabled: true
@@ -76,30 +75,38 @@ plugins:
     zen:
       enabled: true
 
-# 在 AI 提供商 (openai-compatibility) 中管理 Zen 的 Key 和模型
-openai-compatibility:
-  - name: zen
-    base-url: https://opencode.ai/zen/v1
-    api-key-entries:
-      - api-key: sk-your-zen-api-key-here
-    models:
-      - name: mimo-v2.6-flash-free
-      - name: mimo-v2.5-free
-      - name: ling-3.0-flash-fin-free
-      - name: nemotron-3-ultra-free
-      - name: muse-spark-1.3-contributor-free
-
 # 避免 zen 拒绝 image tools
 disable-image-generation: "chat"
 ```
 
+**步骤 2：添加凭证文件**
+在你的 CPA 凭证目录（通常为 `~/.cli-proxy-api/`）创建任意名称的 JSON 凭证文件（例如 `zen-key.json`），或通过 Web 管理中心添加：
+```json
+{
+  "type": "zen",
+  "provider": "zen",
+  "api_key": "sk-your-zen-api-key-here",
+  "base_url": "https://opencode.ai/zen/v1"
+}
+```
+
 > **提示**：
-> - 插件作为 `zen` 专属执行器（Executor），会自动拦截目标为 `zen` 的请求并处理 Session 伪装、请求头伪装、工具注入以及 SSE 流式转发。
-> - 在 Management Center 的 AI 提供商面板修改服务地址（`base-url`）或 API 密钥时，插件会自动动态提取生效，无需在插件配置里重复填写！
+> - 插件会自动将 `provider` 或 `type` 为 `zen` 的认证记录绑定给执行器。
+> - 在 Web 面板或凭证中修改 `base_url`、`api_key`，插件都会动态读取，无需重启或重新配置插件！
+> - 插件内置了全量 OpenCode Zen 免费模型路由（`muse-spark` 自动路由至 `/responses`，其他模型自动路由至 `/chat/completions`）。
 
-#### 兼容方式：在 `plugins.configs.zen` 中配置
+#### 方式二：在 `plugins.configs.zen` 中配置
 
-插件仍支持通过 `plugins.configs.zen` 传入 keys、models、client 等字段，保持对旧版配置的向下兼容。
+插件仍支持通过 `plugins.configs.zen` 传入 keys、models、client 等字段，保持对早期配置的向下兼容：
+```yaml
+plugins:
+  enabled: true
+  configs:
+    zen:
+      enabled: true
+      api-keys:
+        - sk-your-zen-api-key-here
+```
 
 ### Verify
 
