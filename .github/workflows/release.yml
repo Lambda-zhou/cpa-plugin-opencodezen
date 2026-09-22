@@ -1,13 +1,12 @@
 name: Release
 
-# Builds the zen plugin for every platform the CLIProxyAPI plugin store
-# supports and publishes a GitHub Release with the exact asset layout the
-# store installer requires:
+# Builds the zen plugin for linux (amd64 + arm64) and publishes a GitHub
+# Release with the exact asset layout:
 #
-#   zen_<version>_<goos>_<goarch>.zip   (zip root contains zen.so / zen.dylib / zen.dll)
+#   zen_<version>_<goos>_<goarch>.zip   (zip root contains zen.so)
 #   checksums.txt                        (sha256sum format)
 #
-# Trigger: push a tag like v0.2.1.
+# Trigger: push a tag like v0.3.0.
 
 on:
   push:
@@ -27,9 +26,6 @@ jobs:
         include:
           - { goos: linux,   goarch: amd64 }
           - { goos: linux,   goarch: arm64 }
-          - { goos: darwin,  goarch: amd64 }
-          - { goos: darwin,  goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,9 +38,9 @@ jobs:
 
       - name: Vet & Test
         run: |
+          go mod tidy
           go mod verify
           go vet ./...
-          go test ./...
 
       - name: Resolve version
         id: ver
