@@ -1263,9 +1263,25 @@ func readHostStream(streamID string) (httpStreamChunk, error) {
 func emitStreamChunk(streamID string, payload []byte) error {
 	_, err := callHost("host.stream.emit", map[string]any{
 		"stream_id": streamID,
-		"payload":   payload,
+		"payload":   stripSSEPayload(payload),
 	})
 	return err
+}
+
+// stripSSEPayload removes SSE "data:" prefixes and surrounding whitespace
+// from a raw upstream SSE frame so the host bridge can reapply its own "data:"
+// prefix without producing "data: data:" in the final output.
+func stripSSEPayload(raw []byte) []byte {
+	s := strings.TrimSpace(string(raw))
+	// Handle "data: {...}" single-line frames.
+	if after, ok := strings.CutPrefix(s, "data:"); ok {
+		after = strings.TrimLeft(after, " \t")
+		if after != "" {
+			return []byte(after + "\n")
+		}
+	}
+	// Pass through [DONE] and anything unexpected.
+	return raw
 }
 
 func withAuth(headers map[string][]string, apiKey string) map[string][]string {
