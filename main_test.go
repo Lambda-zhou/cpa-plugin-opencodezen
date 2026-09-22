@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -871,5 +872,53 @@ func TestAuthParseExtractsModelsList(t *testing.T) {
 	json.Unmarshal(env.Result, &resp)
 	if !resp.Handled || len(resp.Auth.Models) != 1 {
 		t.Fatalf("expected models in authData, got: %+v", resp)
+	}
+}
+
+func TestLineBufferReassembly(t *testing.T) {
+	// Simulating broken incoming chunks:
+	// Chunk 1: "data: {\"id\":\"123\","
+	// Chunk 2: "\"content\":\"hello\"}\n: keep-alive\ndata: [DONE]\n"
+	part1 := []byte("data: {\"id\":\"123\",")
+	part2 := []byte("\"content\":\"hello\"}\n: keep-alive\ndata: [DONE]\n")
+
+	var lineBuf bytes.Buffer
+	var emitted [][]byte
+
+	feed := func(chunk []byte) {
+		lineBuf.Write(chunk)
+		for {
+			data := lineBuf.Bytes()
+			idx := bytes.IndexByte(data, '\n')
+			if idx < 0 {
+				break
+			}
+			line := make([]byte, idx)
+			copy(line, data[:idx])
+			lineBuf.Next(idx + 1)
+
+			if s := stripSSEPayload(line); len(s) > 0 {
+				emitted = append(emitted, s)
+			}
+		}
+	}
+
+	feed(part1)
+	if len(emitted) != 0 {
+		t.Fatalf("expected 0 emitted lines while line is incomplete, got %d", len(emitted))
+	}
+
+	feed(part2)
+	// Should produce 2 valid outputs: the reassembled JSON and [DONE]
+	// The : keep-alive should be dropped
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted frames, got %d: %v", len(emitted), emitted)
+	}
+
+	if string(emitted[0]) != "{\"id\":\"123\",\"content\":\"hello\"}\n" {
+		t.Fatalf("unexpected line 0: %q", string(emitted[0]))
+	}
+	if string(emitted[1]) != "[DONE]\n" {
+		t.Fatalf("unexpected line 1: %q", string(emitted[1]))
 	}
 }

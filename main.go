@@ -899,6 +899,7 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpoint
 		return
 	}
 
+	var lineBuf bytes.Buffer
 	for {
 		chunk, err := readHostStream(resp.StreamID)
 		if err != nil {
@@ -906,6 +907,11 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpoint
 			return
 		}
 		if chunk.Done {
+			// Flush any trailing line in buffer before closing
+			if lineBuf.Len() > 0 {
+				_ = emitStreamChunk(streamID, lineBuf.Bytes())
+				lineBuf.Reset()
+			}
 			break
 		}
 		if chunk.Error != "" {
@@ -913,9 +919,21 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, endpoint
 			return
 		}
 		if len(chunk.Payload) > 0 {
-			if err := emitStreamChunk(streamID, chunk.Payload); err != nil {
-				closeStream(err.Error())
-				return
+			lineBuf.Write(chunk.Payload)
+			for {
+				data := lineBuf.Bytes()
+				idx := bytes.IndexByte(data, '\n')
+				if idx < 0 {
+					break
+				}
+				line := make([]byte, idx)
+				copy(line, data[:idx])
+				lineBuf.Next(idx + 1)
+
+				if err := emitStreamChunk(streamID, line); err != nil {
+					closeStream(err.Error())
+					return
+				}
 			}
 		}
 	}
@@ -1424,7 +1442,7 @@ func emitStreamChunk(streamID string, payload []byte) error {
 
 // stripSSEPayload removes SSE "data:" prefixes, ignores SSE comments / keep-alives
 // (lines starting with ':'), and cleans surrounding whitespace from a raw upstream
-// SSE frame so the host bridge can reapply its own "data:" prefix cleanly.
+// SSE line so the host bridge can reapply its own "data:" prefix cleanly.
 func stripSSEPayload(raw []byte) []byte {
 	s := strings.TrimSpace(string(raw))
 	if s == "" {
@@ -1434,20 +1452,26 @@ func stripSSEPayload(raw []byte) []byte {
 	if strings.HasPrefix(s, ":") {
 		return nil
 	}
+	// Handle "data: [DONE]"
+	if s == "data: [DONE]" || s == "[DONE]" {
+		return []byte("[DONE]\n")
+	}
 	// Handle "data: {...}" single-line frames.
 	if after, ok := strings.CutPrefix(s, "data:"); ok {
 		after = strings.TrimLeft(after, " \t")
-		if after != "" {
-			// If after stripping "data:" it is another comment or empty, drop it
-			if strings.HasPrefix(after, ":") {
-				return nil
-			}
-			return []byte(after + "\n")
+		if after == "" || strings.HasPrefix(after, ":") {
+			return nil
 		}
-		return nil
+		if after == "[DONE]" {
+			return []byte("[DONE]\n")
+		}
+		return []byte(after + "\n")
 	}
-	// Pass through [DONE] and other valid data lines.
-	return raw
+	// If it doesn't have "data:" prefix (rare in raw stream), ensure valid JSON object
+	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+		return []byte(s + "\n")
+	}
+	return nil
 }
 
 func withAuth(headers map[string][]string, apiKey string) map[string][]string {
