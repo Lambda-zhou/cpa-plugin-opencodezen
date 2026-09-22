@@ -1,0 +1,106 @@
+name: Release
+
+# Builds the zen plugin for every platform the CLIProxyAPI plugin store
+# supports and publishes a GitHub Release with the exact asset layout the
+# store installer requires:
+#
+#   zen_<version>_<goos>_<goarch>.zip   (zip root contains zen.so / zen.dylib / zen.dll)
+#   checksums.txt                        (sha256sum format)
+#
+# Trigger: push a tag like v0.2.1.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Vet & Test
+        run: |
+          go mod verify
+          go vet ./...
+          go test ./...
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext="so"; [ "${GOOS}" = "darwin" ] && ext="dylib"; [ "${GOOS}" = "windows" ] && ext="dll"
+          mkdir -p "dist/${GOOS}_${GOARCH}"
+          go build -trimpath -buildvcs=true -buildmode=c-shared \
+            -ldflags "-s -w -X main.pluginVersion=${{ steps.ver.outputs.version }}" \
+            -o "dist/${GOOS}_${GOARCH}/zen.${ext}" .
+          rm -f "dist/${GOOS}_${GOARCH}/zen.h"
+
+      - name: Package zip (store layout)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext="so"; [ "${GOOS}" = "darwin" ] && ext="dylib"; [ "${GOOS}" = "windows" ] && ext="dll"
+          stage="stage"
+          mkdir -p "${stage}"
+          cp "dist/${GOOS}_${GOARCH}/zen.${ext}" "${stage}/zen.${ext}"
+          ( cd "${stage}" && zip "../zen_${{ steps.ver.outputs.version }}_${GOOS}_${GOARCH}.zip" "zen.${ext}" )
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zen-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            zen_*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum zen_*.zip > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zen_*.zip
+            dist/checksums.txt
+          generate_release_notes: true

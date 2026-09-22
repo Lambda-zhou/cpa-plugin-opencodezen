@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- OpenCode Zen provider logo: a zen circle (ensō) around a spark -->
+  <defs>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#00b8d9"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#0f1117"/>
+  <path d="M64 16a48 48 0 1 0 33.9 82.1"
+        fill="none" stroke="url(#ring)" stroke-width="10"
+        stroke-linecap="round"/>
+  <path d="M70 38 L52 68 h12 l-6 24 22 -32 h-13 z"
+        fill="#ffd166"/>
+</svg>
