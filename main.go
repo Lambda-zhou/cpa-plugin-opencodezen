@@ -444,7 +444,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	C.store_host_api(host)
 	plugin.abi_version = C.uint32_t(abiVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
-	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
+	plugin.free_buffer = C.cliprogy_plugin_free_fn(C.cliproxyPluginFree)
 	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
 	return 0
 }
@@ -596,6 +596,7 @@ func authParse(payload []byte) ([]byte, error) {
 					if authID == "" {
 						authID = fmt.Sprintf("%s-%s", cfg.Provider, id)
 					}
+					modelsList := extractAuthModels(stored)
 					return okEnvelopeJSON(authParseResponse{
 						Handled: true,
 						Auth: authData{
@@ -604,6 +605,7 @@ func authParse(payload []byte) ([]byte, error) {
 							FileName:    fileName,
 							Label:       authLabel(cfg.Provider, id),
 							StorageJSON: req.StorageJSON,
+							Models:      modelsList,
 							Metadata:    map[string]any{"type": cfg.Provider},
 						},
 					})
@@ -680,6 +682,7 @@ type authData struct {
 	ProxyURL         string          `json:"ProxyURL"`
 	Disabled         bool            `json:"Disabled"`
 	StorageJSON      json.RawMessage `json:"StorageJSON"`
+	Models           []any           `json:"Models,omitempty"`
 	Metadata         map[string]any  `json:"Metadata"`
 	Attributes       map[string]any  `json:"Attributes"`
 	NextRefreshAfter string          `json:"NextRefreshAfter"`
@@ -1395,26 +1398,42 @@ func readHostStream(streamID string) (httpStreamChunk, error) {
 
 // emitStreamChunk forwards one payload frame through the plugin stream bridge.
 func emitStreamChunk(streamID string, payload []byte) error {
+	stripped := stripSSEPayload(payload)
+	if len(stripped) == 0 {
+		return nil
+	}
 	_, err := callHost("host.stream.emit", map[string]any{
 		"stream_id": streamID,
-		"payload":   stripSSEPayload(payload),
+		"payload":   stripped,
 	})
 	return err
 }
 
-// stripSSEPayload removes SSE "data:" prefixes and surrounding whitespace
-// from a raw upstream SSE frame so the host bridge can reapply its own "data:"
-// prefix without producing "data: data:" in the final output.
+// stripSSEPayload removes SSE "data:" prefixes, ignores SSE comments / keep-alives
+// (lines starting with ':'), and cleans surrounding whitespace from a raw upstream
+// SSE frame so the host bridge can reapply its own "data:" prefix cleanly.
 func stripSSEPayload(raw []byte) []byte {
 	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return nil
+	}
+	// Drop SSE comments / keep-alives like ": keep-alive", ": ping", ":"
+	if strings.HasPrefix(s, ":") {
+		return nil
+	}
 	// Handle "data: {...}" single-line frames.
 	if after, ok := strings.CutPrefix(s, "data:"); ok {
 		after = strings.TrimLeft(after, " \t")
 		if after != "" {
+			// If after stripping "data:" it is another comment or empty, drop it
+			if strings.HasPrefix(after, ":") {
+				return nil
+			}
 			return []byte(after + "\n")
 		}
+		return nil
 	}
-	// Pass through [DONE] and anything unexpected.
+	// Pass through [DONE] and other valid data lines.
 	return raw
 }
 

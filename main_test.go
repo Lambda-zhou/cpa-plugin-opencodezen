@@ -836,3 +836,40 @@ func TestExecuteStreamRequiresStreamID(t *testing.T) {
 	}
 	_ = route
 }
+
+func TestStripSSEPayloadDropsKeepAlivesAndComments(t *testing.T) {
+	// ": keep-alive" should be dropped completely
+	if res := stripSSEPayload([]byte(": keep-alive\n")); len(res) != 0 {
+		t.Fatalf("expected keep-alive to be dropped, got %q", string(res))
+	}
+	// "data: : keep-alive" should also be dropped
+	if res := stripSSEPayload([]byte("data: : keep-alive\n")); len(res) != 0 {
+		t.Fatalf("expected data keep-alive to be dropped, got %q", string(res))
+	}
+	// standard data chunk should be preserved with data: stripped
+	validChunk := []byte("data: {\"choices\":[]}\n")
+	res := stripSSEPayload(validChunk)
+	if string(res) != "{\"choices\":[]}\n" {
+		t.Fatalf("expected chunk to be preserved, got %q", string(res))
+	}
+}
+
+func TestAuthParseExtractsModelsList(t *testing.T) {
+	resetConfig(t, pluginConfig{Enabled: true, Provider: "zen"})
+	payload, _ := json.Marshal(map[string]any{
+		"Provider": "zen",
+		"StorageJSON": []byte(`{"provider":"zen","api_key":"sk-test","models":[{"name":"custom-model"}]}`),
+		"FileName": "zen-custom.json",
+	})
+	out, err := handleMethod("auth.parse", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	json.Unmarshal(out, &env)
+	var resp authParseResponse
+	json.Unmarshal(env.Result, &resp)
+	if !resp.Handled || len(resp.Auth.Models) != 1 {
+		t.Fatalf("expected models in authData, got: %+v", resp)
+	}
+}
