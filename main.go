@@ -611,7 +611,6 @@ func persistCredentialJSON(provider, apiKey string) json.RawMessage {
 	})
 	return raw
 }
-}
 
 // authLabel renders the management-UI label for one zen key.
 func authLabel(provider, id string) string {
