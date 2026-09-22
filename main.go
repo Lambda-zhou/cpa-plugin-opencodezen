@@ -660,6 +660,19 @@ func extractProvider(stored map[string]any, hostProvider string) string {
 	return strings.TrimSpace(hostProvider)
 }
 
+func extractAuthModels(stored map[string]any) []any {
+	raw, ok := stored["models"]
+	if !ok {
+		return nil
+	}
+	switch t := raw.(type) {
+	case []any:
+		return t
+	default:
+		return nil
+	}
+}
+
 func authLabel(provider, id string) string {
 	if provider == "zen" {
 		return fmt.Sprintf("OpenCode Zen (%s…)", id)
