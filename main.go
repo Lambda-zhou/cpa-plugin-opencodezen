@@ -87,7 +87,7 @@ const (
 	defaultUserAgent = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 )
 
-var pluginVersion = "0.2.0"
+var pluginVersion = "0.3.0"
 
 var (
 	canonicalSessionRe = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)

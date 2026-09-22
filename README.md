@@ -1,4 +1,4 @@
-# cpa-plugin-opencodezen
+﻿# cpa-plugin-opencodezen
 
 <div align="center">
 
@@ -12,61 +12,47 @@
 
 </div>
 
-A CLIProxyAPI **executor plugin** that serves [OpenCode Zen](https://opencode.ai/zen)
-free-tier models as a native provider — no `openai-compatibility` config, no forked binary.
+用于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 **原生执行器插件**，让你可以直接在 CLIProxyAPI 中无痛使用 [OpenCode Zen](https://opencode.ai/zen) 的免费系列模型（如 `mimo-v2.6-flash-free`、`muse-spark-1.3-contributor-free` 等），无需修改或重新编译 CPA 宿主二进制。
 
-## Why
+---
 
-Stock CLIProxyAPI can't serve OpenCode Zen free-tier models because:
+## 解决的问题
 
-1. **Endpoint split**: `muse-spark` answers `/responses`; the other free models
-   answer `/chat/completions`. Stock `openai-compatibility` posts everything to
-   one path.
-2. **FreeTier gate**: Zen validates four rules on every request — canonical
-   `ses_`/`msg_` session IDs, identity headers, `bash`+`read` tools, and
-   `stream: true`. Missing any → `403 FreeTierError` which poisons the key pool
-   for ~15 minutes (`503 auth_unavailable`).
+1. **端点路由自动分流（Endpoint Split）**：
+   - OpenCode Zen 的部分模型（如 `muse-spark`）只响应 `/responses` 端点，而其余大部分免费模型响应 `/chat/completions`。
+   - 插件内置智能分流规则：识别 `muse` 自动走 `/responses`，其他模型自动走 `/chat/completions`，无需手动在配置中区分。
 
-Existing solutions ([smyhlin/cpa-zen][cpa-zen]) patch the CPA binary to add
-per-model endpoint splitting, gate emulation, and SSE reassembly in
-`openai_compat_executor.go`. That works but forks the server.
+2. **免费层门禁自动伪装（FreeTier Gate）**：
+   - Zen 服务端对未通过官方 CLI 发起的请求有严格的校验（检查 `ses_` / `msg_` 规范格式会话头、客户端特征头 `cli`、`bash`/`read` 工具集、强制 `stream: true` 等），缺一不可，否则返回 `403 FreeTierError` 并封禁 Key 约 15 分钟。
+   - 插件全自动伪装为官方 CLI 规范，确保百分百顺利通行。
 
-This plugin solves it **as a native provider executor plugin** — CPA's host
-translates client protocols into `chat-completions` or `responses` format for
-us, we do the gate + upstream POST to Zen through the host HTTP client, and the
-host translates our output back to whatever the client expects. Zero fork,
-survives upstream updates.
+3. **SSE 流式传输重拼与保活过滤（Stream Reassembly）**：
+   - 修复上游分片造成的跨包 SSE 截断问题，确保下游收到的每个 `data: {...}` 均为完整合法的 JSON 对象。
+   - 自动过滤上游的 `: keep-alive` 心跳注释帧，避免 LobeHub、NextChat 等客户端因非法 JSON 报错崩溃。
 
-## Install
+4. **无感集成，原生提供商体验**：
+   - 配置完全脱离插件管理面板，用户只需在凭证目录或 Web 认证面板中添加一个标准的 `zen` 认证文件即可，服务地址与 API Key 支持动态感知生效。
 
-### Option A — from the CPA plugin store (recommended)
+---
 
-In the CPA Management Center, open **Plugin Store**, find **OpenCode Zen**,
-click **Install**. The host downloads the release zip for your platform,
-verifies `checksums.txt`, and writes the plugin configuration for you.
+## 安装方法
 
-Then add your keys and models to `plugins.configs.zen` (see below) and restart.
+从 [Releases](https://github.com/Victor9578/cpa-plugin-opencodezen/releases) 下载适用于你系统架构的编译包（例如 `zen_0.3.0_linux_amd64.zip`）。
 
-### Option B — manual install
+解压后将 `zen.so`（或 `zen.dylib` / `zen.dll`）放入 CPA 的插件目录（文件名必须为 `zen.so` / `zen.dylib` / `zen.dll`）：
 
-1. Download the zip for your platform from
-   [Releases](https://github.com/Victor9578/cpa-plugin-opencodezen/releases)
-   (e.g. `zen_0.2.0_linux_amd64.zip`).
-2. Unzip it. The zip root contains `zen.so` (or `zen.dylib` / `zen.dll`).
-3. Copy the dynamic library into your CPA plugin directory — **the filename
-   must be the plugin ID**:
-   ```
-   /CLIProxyAPI/plugins/linux/amd64/zen.so
-   ```
-4. Enable plugins and configure `zen` in `config.yaml` (below), restart CPA.
+```bash
+/CLIProxyAPI/plugins/linux/amd64/zen.so
+```
 
-### Configure
+---
 
-#### 方式一：在 AI 提供商 / 凭据面板（OAuth / 认证管理）中配置（强烈推荐）
+## 使用指南
 
-插件作为��生的 `zen` 供应商执行器（Executor）与认证提供者（AuthProvider），请求将完全经过插件的 Gate 伪装引擎。
+### 1. 启用插件（`config.yaml`）
 
-**步骤 1：在 `config.yaml` 中仅需启用插件**
+在 `config.yaml` 中启用插件即可：
+
 ```yaml
 plugins:
   enabled: true
@@ -74,13 +60,12 @@ plugins:
   configs:
     zen:
       enabled: true
-
-# 避免 zen 拒绝 image tools
-disable-image-generation: "chat"
 ```
 
-**步骤 2：添加凭证文件**
-在你的 CPA 凭证目录（通常为 `~/.cli-proxy-api/`）创建任意名称的 JSON 凭证文件（例如 `zen-key.json`），或通过 Web 管理中心添加：
+### 2. 添加凭证（认证目录）
+
+在 CPA 的 `auth-dir`（例如 `/root/.cli-proxy-api/`）目录下创建一个 JSON 文件（例如 `zen-key.json`），或通过 Web 管理中心添加：
+
 ```json
 {
   "type": "zen",
@@ -90,124 +75,34 @@ disable-image-generation: "chat"
 }
 ```
 
-> **提示**：
-> - 插件会自动将 `provider` 或 `type` 为 `zen` 的认证记录绑定给执行器。
-> - 在 Web 面板或凭证中修改 `base_url`、`api_key`，插件都会动态读取，无需重启或重新配置插件！
-> - 插件内置了全量 OpenCode Zen 免费模型路由（`muse-spark` 自动路由至 `/responses`，其他模型自动路由至 `/chat/completions`）。
+> **说明**：
+> - 插件默认已注册以下免费模型：`mimo-v2.6-flash-free`、`mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`nemotron-3-ultra-free`、`muse-spark-1.3-contributor-free`。
+> - 如果官方上线了新模型，可以在该 JSON 文件中添加 `"models": [{"name": "新模型名"}]` 即可动态生效，无需重新编译插件。
 
-#### 方式二：在 `plugins.configs.zen` 中配置
+---
 
-插件仍支持通过 `plugins.configs.zen` 传入 keys、models、client 等字段，保持对早期配置的向下兼容：
-```yaml
-plugins:
-  enabled: true
-  configs:
-    zen:
-      enabled: true
-      api-keys:
-        - sk-your-zen-api-key-here
-```
-
-### Verify
+## 验证与测试
 
 ```bash
+# 重启 CPA
 docker restart cli-proxy-api
-docker logs cli-proxy-api | grep -E "zen|plugin:zen"
 
-# Test chat
-curl -s http://localhost:8317/v1/chat/completions \
+# 测试聊天
+curl -s http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $CPA_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mimo-v2.6-flash-free","stream":true,"messages":[{"role":"user","content":"Reply with: pong"}]}'
-
-# Test responses (muse-spark)
-curl -s http://localhost:8317/v1/responses \
-  -H "Authorization: Bearer $CPA_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"muse-spark-1.3-contributor-free","input":"Reply with: pong","stream":true}'
+  -d '{"model":"mimo-v2.6-flash-free","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-## How it works
+---
 
-As an `executor` plugin, CPA registers us as a provider called `zen`. At
-startup we also run `model.register` to announce our models. When a client
-requests a zen model, CPA routes it to us automatically.
+## 致谢与参考
 
-1. **Model registration** — `model.register` announces each configured model
-   with its alias.
-2. **Executor identifier** — `executor.identifier` → `zen` (the provider key).
-3. **Credential sync** — configured `api-keys` are persisted as
-   `zen-<hash>.json` credential files via `host.auth.save`; the host parses
-   them back through `auth.parse`.
-4. **Execute / ExecuteStream** — the host translates the client request and
-   calls us. We:
-   - resolve the model's upstream endpoint (`/chat/completions` or `/responses`)
-   - inject canonical `ses_`/`msg_` session/request IDs
-   - force `"stream": true`
-   - ensure `bash` + `read` tools (in the right dialect)
-   - key-rotate POST to Zen via the host HTTP bridge
-   - stream SSE chunks back through the plugin stream bridge
-   - for non-streaming clients: fold the SSE answer into one JSON object
-5. **CountTokens** — stub (zen doesn't have a standalone token-count endpoint).
+- [cpa-plugin-opencode-session-mapper](https://github.com/ahoo/cpa-plugin-opencode-session-mapper) - 会话头映射插件的先行者，为会话 ID 规范化处理提供了思路。
+- [OpenCode2API](https://github.com/TiaraBasori/OpenCode2API) - 早期的 OpenCode 接入探索，为 Zen 免费层伪装提供了宝贵参考。
 
-## Configuration reference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `true` | Master switch. |
-| `provider` | `zen` | Provider key CPA uses for routing. |
-| `base-url` | `https://opencode.ai/zen/v1` | Zen base URL (do not append `/responses` — the plugin handles the per-model split). |
-| `api-keys` | *(required)* | Zen API keys; the plugin rotates them round-robin and persists each as a credential file. |
-| `client` | `cli` | `X-Opencode-Client` value. |
-| `project` | `global` | `X-Opencode-Project` value. |
-| `models` | *(required)* | Model entries, each with `model` (upstream name), `endpoint` (`chat` or `responses`), and `alias` (client-facing name). |
-
-## Troubleshooting
-
-- **`503 auth_unavailable`** — a key hit Zen's `403 FreeTierError` and is
-  quarantined for ~15 minutes. Check that your keys are valid free-tier Zen
-  keys, and wait out the window or rotate in another key.
-- **`auth_not_found`** — no credential records for provider `zen`. Confirm
-  `api-keys` is configured and the plugin registered (see logs above); the
-  plugin writes `zen-<hash>.json` files into the auth directory on startup.
-- **Model not found** — the requested model must match a `model` or `alias`
-  entry in `plugins.configs.zen.models`.
-
-## Prior Art / Compatibility
-
-- **vs `opencode-session-mapper`**: That plugin forwards raw session IDs as
-  request-interceptor headers. This plugin does canonicalized `ses_`/`msg_`
-  IDs, gate tool injection, and stream enforcement. If you also run
-  `opencode-session-mapper`, disable it — they overlap.
-- **vs `smyhlin/cpa-zen`**: That image patches the CPA binary. This plugin runs
-  on the official binary as an executor provider. The trade-off: a patched
-  binary has lower per-request overhead (no cgo crossing), while a plugin
-  survives upstream updates.
-
-## Development
-
-The CLIProxyAPI runtime image is Debian-based (glibc). `build.sh` pins a
-Debian Go image, runs `go vet` + `go test` before packaging.
-
-```bash
-./build.sh                                  # linux/amd64 → dist/local/
-GOOS=linux GOARCH=arm64 ./build.sh          # linux/arm64
-PLUGIN_VERSION=0.2.1 ./build.sh             # override version
-```
-
-Releasing: push a tag `v0.2.1`; the [Release workflow](.github/workflows/release.yml)
-runs vet/tests, builds all store platforms, and publishes the GitHub Release
-with `zen_<version>_<goos>_<goarch>.zip` + `checksums.txt` assets.
-
-```bash
-go mod verify
-go vet ./...
-go test ./...
-go test -race ./...
-```
+---
 
 ## License
 
-MIT
-
-[cpa-zen]: https://hub.docker.com/r/smyhlin/cpa-zen
+[MIT](LICENSE)
