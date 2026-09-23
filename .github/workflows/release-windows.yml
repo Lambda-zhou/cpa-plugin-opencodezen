@@ -1,0 +1,107 @@
+name: Release (Windows)
+
+# Builds the zen plugin for Windows (amd64) and publishes a GitHub
+# Release with the exact asset layout:
+#
+#   zen_<version>_windows_amd64.zip   (zip root contains zen.dll)
+#   checksums-windows.txt             (sha256sum format)
+#
+# Trigger: push a tag like v0.3.0.
+# This workflow is Windows-only. The companion linux release stays in
+# release.yml.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build & Release (Windows)
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # windows-2025 runner ships mingw-w64 gcc 15.2.0 in PATH (MSYS2).
+      # Verify it is reachable so CGO_ENABLED=1 can link the c-shared DLL.
+      - name: Check C toolchain
+        shell: pwsh
+        run: |
+          gcc --version
+          go env CGO_ENABLED GOOS GOARCH
+
+      - name: Vet & Test
+        run: |
+          go mod tidy
+          go mod verify
+          go vet ./...
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          Write-Output "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      - name: Build
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path "dist/windows_amd64" | Out-Null
+          go build -trimpath -buildvcs=true -buildmode=c-shared `
+            -ldflags "-s -w -X main.pluginVersion=$ver" `
+            -o "dist/windows_amd64/zen.dll" .
+          Remove-Item -Force "dist/windows_amd64/zen.h" -ErrorAction SilentlyContinue
+
+      - name: Package zip (store layout)
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path "stage" | Out-Null
+          Copy-Item "dist/windows_amd64/zen.dll" "stage/zen.dll"
+          Compress-Archive -Path "stage/zen.dll" -DestinationPath "zen_${ver}_windows_amd64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zen-windows-amd64
+          path: zen_*.zip
+          if-no-files-found: error
+
+  publish-windows:
+    name: Publish Release (Windows)
+    needs: release-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        shell: bash
+        run: sha256sum zen_*.zip > checksums-windows.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zen_*.zip
+            dist/checksums-windows.txt
+          generate_release_notes: true
