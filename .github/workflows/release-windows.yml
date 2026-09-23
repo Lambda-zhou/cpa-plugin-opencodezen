@@ -6,14 +6,16 @@ name: Release (Windows)
 #   zen_<version>_windows_amd64.zip   (zip root contains zen.dll)
 #   checksums-windows.txt             (sha256sum format)
 #
-# Trigger: push a tag like v0.3.0.
+# Trigger: every push to main (no manual tag needed). Can also be
+# triggered manually from the Actions tab (workflow_dispatch).
 # This workflow is Windows-only. The companion linux release stays in
 # release.yml.
 
 on:
+  workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - 'main'
 
 permissions:
   contents: write
@@ -46,11 +48,14 @@ jobs:
           go mod verify
           go vet ./...
 
+      # Version = short commit hash. On main pushes GITHUB_REF_NAME is
+      # "main", not a tag, so use the commit SHA (first 7 chars) to keep
+      # every build's asset name unique.
       - name: Resolve version
         id: ver
         shell: pwsh
         run: |
-          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          $v = $env:GITHUB_SHA.Substring(0, 7)
           Write-Output "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
 
       - name: Build
