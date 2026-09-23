@@ -1,7 +1,7 @@
-name: Release (Windows)
+name: Build zen plugin (Windows)
 
-# Builds the zen plugin for Windows (amd64) and publishes a GitHub
-# Release with the exact asset layout:
+# Builds the zen plugin for Windows (amd64) and uploads the build
+# artifact (no GitHub Release, since main pushes have no tag):
 #
 #   zen_<version>_windows_amd64.zip   (zip root contains zen.dll)
 #   checksums-windows.txt             (sha256sum format)
@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   release-windows:
-    name: Build & Release (Windows)
+    name: Build zen.dll (Windows)
     runs-on: windows-2025
     steps:
       - name: Checkout
@@ -80,33 +80,18 @@ jobs:
           Copy-Item "dist/windows_amd64/zen.dll" "stage/zen.dll"
           Compress-Archive -Path "stage/zen.dll" -DestinationPath "zen_${ver}_windows_amd64.zip" -Force
 
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          Get-FileHash -Algorithm SHA256 -Path "zen_*.zip" |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+            Set-Content -Path "checksums-windows.txt" -Encoding ascii
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: zen-windows-amd64
-          path: zen_*.zip
+          path: |
+            zen_*.zip
+            checksums-windows.txt
           if-no-files-found: error
-
-  publish-windows:
-    name: Publish Release (Windows)
-    needs: release-windows
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: dist
-        shell: bash
-        run: sha256sum zen_*.zip > checksums-windows.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/zen_*.zip
-            dist/checksums-windows.txt
-          generate_release_notes: true
